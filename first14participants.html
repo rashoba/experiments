@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Russian Self-Paced Reading with EEG + TTS</title>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            font-family: 'Roboto', Arial, sans-serif;
+            background: linear-gradient(135deg, #1e3c72, #2a5298);
+            color: #fff;
+        }
+        #experimentContainer {
+            text-align: center;
+            padding: 30px;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 15px;
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.3);
+            max-width: 600px;
+            width: 90%;
+        }
+        #wordDisplay {
+            font-size: 40px;
+            font-weight: bold;
+            color: #1e3c72;
+            min-height: 60px;
+            margin-bottom: 20px;
+            transition: opacity 0.3s ease-in-out;
+        }
+        #wordDisplay.fade {
+            opacity: 0;
+        }
+        #startButton {
+            padding: 12px 24px;
+            font-size: 18px;
+            background: #ff6f61;
+            color: white;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            transition: transform 0.2s, background 0.3s;
+        }
+        #startButton:hover {
+            background: #e65b50;
+            transform: scale(1.05);
+        }
+        #progressText {
+            font-size: 16px;
+            color: #555;
+            margin-top: 15px;
+            font-style: italic;
+        }
+        #eegContainer {
+            margin-top: 20px;
+            width: 100%;
+            max-width: 400px;
+            height: 150px;
+            background: #f0f0f0;
+            border-radius: 10px;
+            position: relative;
+            display: none;
+        }
+        #eegCanvas {
+            width: 100%;
+            height: 100%;
+        }
+        #instructions {
+            font-size: 16px;
+            color: #666;
+            margin-top: 15px;
+        }
+        #demographics {
+            margin-bottom: 20px;
+        }
+        #demographics input, #demographics select {
+            margin: 5px;
+            padding: 5px;
+        }
+        @media (max-width: 600px) {
+            #wordDisplay {
+                font-size: 30px;
+            }
+            #experimentContainer {
+                padding: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="experimentContainer">
+        <div id="demographics">
+            <label style="color: blue;">Age: <input type="number" id="age" min="1" max="100" value="25"></label><br>
+            <p style="color: blue;">Suggested Age Ranges: Beginners (20–25), Intermediates (26–30), Advanced (31–40)</p>
+            <label style="color: blue;">Language Proficiency: 
+                <select id="proficiency">
+                    <option value="beginner">Beginner</option>
+                    <option value="intermediate">Intermediate</option>
+                    <option value="advanced">Advanced</option>
+                </select>
+            </label>
+        </div>
+        <div id="wordDisplay">Enter Demographics and Press Start</div>
+        <button id="startButton">Start Experiment</button>
+        <div id="progressText"></div>
+        <div id="eegContainer">
+            <canvas id="eegCanvas"></canvas>
+        </div>
+        <div id="instructions">Wait for the word to finish pronouncing, then press Spacebar to advance</div>
+    </div>
+
+    <script>
+        const trials = [
+            { sentence_id: 1, sentence_type: "Canonical (SVO)", words: ["Мальчик", "читает", "книгу"] },
+            { sentence_id: 2, sentence_type: "Non-Canonical", words: ["Книгу", "читает", "мальчик"] },
+            { sentence_id: 3, sentence_type: "Non-Canonical", words: ["Читает", "мальчик", "книгу"] },
+            { sentence_id: 4, sentence_type: "Non-Canonical", words: ["Мальчик", "книгу", "читает"] },
+            { sentence_id: 5, sentence_type: "Non-Canonical", words: ["Мальчик", "который", "играет", "видит", "собаку"] }
+        ];
+
+        const wordFrequency = {
+            "Мальчик": 50, "читает": 70, "книгу": 60, "Книгу": 60, "мальчик": 50,
+            "Читает": 70, "который": 80, "играет": 40, "видит": 55, "собаку": 45
+        };
+
+        let currentTrial = 0;
+        let currentWordIndex = -1;
+        let trialData = [];
+        let startTime = null;
+        let isRunning = false;
+        let participantCount = 0;
+        const maxParticipants = 14;
+
+        let russianVoice = null;
+        function loadVoices() {
+            const voices = window.speechSynthesis.getVoices();
+            russianVoice = voices.find(v => v.lang === 'ru-RU');
+        }
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+        loadVoices();
+
+        const canvas = document.getElementById("eegCanvas");
+        const ctx = canvas.getContext("2d");
+        let animationFrameId;
+        let time = 0;
+
+        function drawWaveform() {
+            const width = canvas.width;
+            const height = canvas.height;
+            ctx.clearRect(0, 0, width, height);
+            ctx.strokeStyle = "#ddd";
+            ctx.lineWidth = 0.5;
+            for (let y = 0; y <= height; y += height / 4) {
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(width, y);
+                ctx.stroke();
+            }
+            ctx.strokeStyle = "#ff6f61";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            for (let x = 0; x < width; x++) {
+                const t = (x / width) * 0.7 + time;
+                const amplitude = 30 * Math.sin(2 * Math.PI * 6 * t) * Math.exp(-t * t / 0.3);
+                const y = height / 2 + amplitude;
+                if (x === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+            time += 0.02;
+            animationFrameId = requestAnimationFrame(drawWaveform);
+        }
+
+        function showEEG() {
+            const eegContainer = document.getElementById("eegContainer");
+            eegContainer.style.display = "block";
+            canvas.width = eegContainer.clientWidth;
+            canvas.height = eegContainer.clientHeight;
+            time = 0;
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+            drawWaveform();
+        }
+
+        function hideEEG() {
+            const eegContainer = document.getElementById("eegContainer");
+            eegContainer.style.display = "none";
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+        }
+
+        function updateProgress() {
+            const progressText = currentWordIndex >= 0 
+                ? `Sentence ${currentTrial + 1} of ${trials.length}, Word ${currentWordIndex + 1} of ${trials[currentTrial].words.length}`
+                : `Sentence ${currentTrial + 1} of ${trials.length}`;
+            document.getElementById("progressText").textContent = isRunning ? progressText : "";
+        }
+
+        function showWord() {
+            const wordDisplay = document.getElementById("wordDisplay");
+            wordDisplay.classList.add("fade");
+
+            setTimeout(() => {
+                if (currentWordIndex < trials[currentTrial].words.length) {
+                    const word = trials[currentTrial].words[currentWordIndex];
+                    wordDisplay.textContent = word;
+
+                    const utterance = new SpeechSynthesisUtterance(word);
+                    utterance.lang = 'ru-RU';
+                    if (russianVoice) utterance.voice = russianVoice;
+
+                    utterance.onstart = () => {
+                        showEEG();
+                    };
+                    utterance.onend = () => {
+                        document.getElementById("instructions").textContent = "Press Spacebar to advance";
+                    };
+
+                    speechSynthesis.cancel();
+                    speechSynthesis.speak(utterance);
+
+                    if (currentWordIndex >= 0) {
+                        trialData.push({
+                            sentence_id: trials[currentTrial].sentence_id,
+                            sentence_type: trials[currentTrial].sentence_type,
+                            word: word,
+                            word_position: currentWordIndex + 1,
+                            word_onset_ms: performance.now(),
+                            response_time_ms: 0,
+                            sentence_length: trials[currentTrial].words.length,
+                            word_frequency: wordFrequency[word] || 0
+                        });
+                    }
+                    startTime = performance.now();
+                } else {
+                    wordDisplay.textContent = "End of Sentence";
+                    hideEEG();
+                }
+
+                wordDisplay.classList.remove("fade");
+                updateProgress();
+            }, 300);
+        }
+
+        function downloadCSV(participantId) {
+            const age = document.getElementById("age").value;
+            const proficiency = document.getElementById("proficiency").value;
+            let csvContent = "sentence_id,word,word_position,response_time_ms,word_onset_ms,sentence_length,word_frequency,age,language_proficiency,sentence_type\n";
+            trialData.forEach((data) => {
+                const rt = data.response_time_ms ? data.response_time_ms.toFixed(2) : "0";
+                csvContent += `${data.sentence_id},${data.word},${data.word_position},${rt},${data.word_onset_ms.toFixed(2)},${data.sentence_length},${data.word_frequency},${age},${proficiency},${data.sentence_type}\n`;
+            });
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            link.download = `reading_task_data_participant_${participantId + 1}.csv`;
+            link.click();
+        }
+
+        document.getElementById("startButton").addEventListener("click", function() {
+            this.style.display = "none";
+            document.getElementById("demographics").style.display = "none";
+            isRunning = true;
+            document.getElementById("wordDisplay").textContent = "Press Spacebar to Begin";
+            document.getElementById("instructions").textContent = "Wait for the word to finish pronouncing, then press Spacebar";
+            currentWordIndex = -1;
+            updateProgress();
+        });
+
+        document.addEventListener("keydown", function(event) {
+            if (event.code === "Space" && isRunning) {
+                event.preventDefault();
+                
+                if (startTime && currentWordIndex >= 0) {
+                    const endTime = performance.now();
+                    const responseTime = endTime - startTime;
+                    trialData[trialData.length - 1].response_time_ms = responseTime;
+                }
+
+                currentWordIndex++;
+                if (currentWordIndex < trials[currentTrial].words.length) {
+                    showWord();
+                } else if (currentTrial < trials.length - 1) {
+                    currentTrial++;
+                    currentWordIndex = -1;
+                    document.getElementById("wordDisplay").textContent = "Press Spacebar for Next Sentence";
+                    hideEEG();
+                    updateProgress();
+                } else {
+                    isRunning = false;
+                    document.getElementById("wordDisplay").textContent = "Experiment Complete!";
+                    document.getElementById("progressText").textContent = "Experiment Complete!";
+                    document.getElementById("instructions").textContent = "";
+                    hideEEG();
+                    downloadCSV(participantCount);
+                    participantCount++;
+                    if (participantCount < maxParticipants) {
+                        setTimeout(() => {
+                            trialData = [];
+                            currentTrial = 0;
+                            currentWordIndex = -1;
+                            isRunning = false;
+                            document.getElementById("startButton").style.display = "block";
+                            document.getElementById("demographics").style.display = "block";
+                            document.getElementById("wordDisplay").textContent = `Participant ${participantCount + 1}: Enter Demographics and Press Start`;
+                            document.getElementById("progressText").textContent = "";
+                        }, 2000);
+                    }
+                }
+            }
+        });
+    </script>
+</body>
+</html>
